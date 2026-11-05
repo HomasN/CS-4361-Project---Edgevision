@@ -242,7 +242,7 @@ namespace Edgevision.EditorTools
             cube.GetComponent<Renderer>().sharedMaterial = mat;
 
             var rb = cube.AddComponent<Rigidbody>();
-            rb.isKinematic = true;
+            rb.isKinematic = false; // falls with gravity after being let go
             rb.interpolation = RigidbodyInterpolation.Interpolate;
             rb.collisionDetectionMode = CollisionDetectionMode.ContinuousSpeculative;
 

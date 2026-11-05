@@ -1,3 +1,4 @@
+using System.Collections.Generic;
 using UnityEngine;
 using UnityEngine.EventSystems;
 using UnityEngine.InputSystem;
@@ -5,15 +6,33 @@ using UnityEngine.InputSystem;
 namespace Edgevision
 {
     /// <summary>
-    /// Handles object interaction: raycasts from the center of the camera,
-    /// picks up / releases ObjectGrabbable objects with left click, and adjusts
-    /// the hold distance with the mouse scroll wheel.
+    /// Superliminal-style forced-perspective pick up / let go.
     ///
-    /// While an object is held, its PerspectiveScaler keeps the apparent size
-    /// constant (S2 = S1 * D2 / D1) and two safety checks keep it out of
-    /// geometry: a sphere cast clamps the distance along the view direction,
-    /// and an overlap box prevents growing sideways into walls.
+    /// PICK UP: left click while aiming at an ObjectGrabbable. The object's
+    /// apparent (on-screen) size at that moment is locked in.
+    ///
+    /// HOLD: every frame the object is centred on the crosshair and pushed as
+    /// FAR AWAY as possible along the view until it touches the scenery behind
+    /// it, while its scale is set to S = S0 * D / D0 so it looks exactly the
+    /// same size on screen. Aim at a far wall → it becomes huge; aim at the
+    /// floor near your feet → it becomes tiny. Its rotation follows the
+    /// player's yaw only, so turning keeps the same face toward you, while
+    /// looking up / down reveals its bottom / top.
+    ///
+    /// LET GO: left click again. The object keeps its new size and position
+    /// and drops under gravity.
+    ///
+    /// HOW THE FARTHEST SPOT IS FOUND
+    /// Because scale is proportional to distance, the object at distance t is
+    /// the object at distance 1 scaled by t about the camera. Every point p on
+    /// the object therefore moves along its own ray from the camera:
+    ///     p(t) = camera + t * v_p
+    /// Raycasting along v_p and dividing the hit distance by |v_p| gives the
+    /// largest t that point allows; the minimum over a grid of surface points
+    /// is the farthest valid placement. A box overlap check then guards
+    /// against thin geometry slipping between the sample rays.
     /// </summary>
+    [DefaultExecutionOrder(100)]
     public class ObjectGrabber : MonoBehaviour
     {
         [Header("References")]
@@ -23,30 +42,43 @@ namespace Edgevision
         [SerializeField] private GameUI ui;
 
         [Header("Targeting")]
-        [SerializeField] private float interactionRange = 6f;
+        [SerializeField] private float interactionRange = 15f;
         [Tooltip("Layer mask containing grabbable objects (the 'Grabbable' layer).")]
         [SerializeField] private LayerMask grabbableMask;
-        [Tooltip("Layers treated as solid obstructions (walls, floor, ledge).")]
+        [Tooltip("Layers treated as solid scenery (walls, floor, ledge). Other grabbables are added automatically.")]
         [SerializeField] private LayerMask obstructionMask;
 
-        [Header("Holding")]
-        [SerializeField] private float minHoldDistance = 1f;
-        [SerializeField] private float maxHoldDistance = 8f;
-        [Tooltip("Hold-distance change per scroll-wheel notch.")]
-        [SerializeField] private float scrollSpeed = 1.5f;
-        [Tooltip("Margin kept between the held object and obstructions.")]
-        [SerializeField] private float wallMargin = 0.05f;
+        [Header("Placement")]
+        [Tooltip("Closest the nearest point of the held object may get to the camera (along view depth).")]
+        [SerializeField] private float minViewDepth = 0.3f;
+        [Tooltip("How far the object may be pushed when nothing is behind it.")]
+        [SerializeField] private float maxPlacementDistance = 150f;
+        [Tooltip("Gap kept between the held object and the scenery it rests against.")]
+        [SerializeField] private float wallMargin = 0.02f;
+        [Tooltip("Sample points per box edge used for the placement raycasts (per face: n x n).")]
+        [Range(2, 8)]
+        [SerializeField] private int samplesPerEdge = 5;
+        [Tooltip("Seconds for the object to slide onto the crosshair after pickup.")]
+        [SerializeField] private float centerTime = 0.12f;
 
         private InputAction attackAction;
 
         private ObjectGrabbable currentTarget;
         private ObjectGrabbable held;
         private PerspectiveScaler heldScaler;
-        private float holdDistance;
-        private float lastSafeDistance;
+
+        private Quaternion yawRelativeRotation;  // object rotation relative to camera yaw
+        private Vector3 pickupLocalDirection;    // object direction in camera space at pickup
+        private float centerProgress;
+        private float currentDistance;
+        private readonly List<Vector3> localSamples = new List<Vector3>();
+        private Vector3 localBoundsCenter;
+        private Vector3 localBoundsSize;
         private bool wasCursorLocked;
 
         public bool IsHolding => held != null;
+
+        private int PlacementMask => obstructionMask | grabbableMask;
 
         private void Awake()
         {
@@ -79,14 +111,16 @@ namespace Edgevision
             }
         }
 
+        private void OnDisable() => Release();
+
+        // ------------------------------------------------------------------ input
+
         private void Update()
         {
             bool locked = Cursor.lockState == CursorLockMode.Locked;
             bool justLocked = locked && !wasCursorLocked;
             wasCursorLocked = locked;
 
-            // Interaction is blocked while the cursor is free, on the frame it
-            // re-locks (so the locking click doesn't grab), and over UI elements.
             bool canInteract = locked && !justLocked &&
                 (EventSystem.current == null || !EventSystem.current.IsPointerOverGameObject());
 
@@ -96,12 +130,9 @@ namespace Edgevision
                 if (canInteract && currentTarget != null && GrabPressedThisFrame())
                     Grab(currentTarget);
             }
-            else
+            else if (!canInteract || GrabPressedThisFrame())
             {
-                UpdateHoldDistance();
-                // Releasing also happens if the cursor unlocks (e.g. Escape).
-                if (!canInteract || GrabPressedThisFrame())
-                    Release();
+                Release();
             }
         }
 
@@ -119,7 +150,8 @@ namespace Edgevision
             if (canInteract && playerCamera != null)
             {
                 Ray ray = playerCamera.ViewportPointToRay(new Vector3(0.5f, 0.5f, 0f));
-                if (Physics.Raycast(ray, out RaycastHit hit, interactionRange, grabbableMask, QueryTriggerInteraction.Ignore))
+                // Hit anything solid so objects behind walls can't be grabbed.
+                if (Physics.Raycast(ray, out RaycastHit hit, interactionRange, PlacementMask, QueryTriggerInteraction.Ignore))
                     newTarget = hit.collider.GetComponentInParent<ObjectGrabbable>();
             }
 
@@ -133,37 +165,44 @@ namespace Edgevision
                 ui.SetTargeting(currentTarget != null);
         }
 
+        // ------------------------------------------------------------ grab/release
+
         private void Grab(ObjectGrabbable grabbable)
         {
             if (playerCamera == null)
                 return;
 
+            Transform cam = playerCamera.transform;
             held = grabbable;
             heldScaler = grabbable.GetComponent<PerspectiveScaler>();
+            if (heldScaler == null)
+                heldScaler = grabbable.gameObject.AddComponent<PerspectiveScaler>();
 
-            float distance = Vector3.Distance(playerCamera.transform.position, grabbable.transform.position);
-            holdDistance = Mathf.Clamp(distance, minHoldDistance, maxHoldDistance);
-            lastSafeDistance = holdDistance;
+            grabbable.OnGrabbed(); // unparents, disables colliders, ignore-raycast layer
 
-            grabbable.OnGrabbed();
-            if (heldScaler != null)
-                heldScaler.BeginHold(holdDistance); // reference scale + distance captured here
-            else
-                Debug.LogWarning($"[ObjectGrabber] '{grabbable.name}' has no PerspectiveScaler; it will not resize.", grabbable);
+            Vector3 toObject = grabbable.transform.position - cam.position;
+            float distance = Mathf.Max(0.05f, toObject.magnitude);
+            heldScaler.BeginHold(distance); // S0 and D0 captured once
+            currentDistance = distance;
+
+            pickupLocalDirection = cam.InverseTransformDirection(toObject / distance);
+            centerProgress = 0f;
+            yawRelativeRotation = Quaternion.Inverse(YawRotation(cam)) * grabbable.transform.rotation;
+
+            BuildSamples(grabbable);
 
             currentTarget = null;
             if (highlight != null) highlight.SetTarget(null);
             if (ui != null) ui.SetHolding(true);
         }
 
-        /// <summary>Release the held object. Its final world scale persists.</summary>
+        /// <summary>Let go: the object keeps its size and drops.</summary>
         public void Release()
         {
             if (held == null)
                 return;
 
-            if (heldScaler != null)
-                heldScaler.EndHold(); // final scale stays on the transform
+            heldScaler.EndHold();
             held.OnReleased();
 
             held = null;
@@ -171,87 +210,145 @@ namespace Edgevision
             if (ui != null) ui.SetHolding(false);
         }
 
-        private void UpdateHoldDistance()
-        {
-            if (Mouse.current == null)
-                return;
-            float notches = Mouse.current.scroll.ReadValue().y / 120f; // 120 = one wheel notch
-            if (!Mathf.Approximately(notches, 0f))
-                holdDistance = Mathf.Clamp(holdDistance + notches * scrollSpeed, minHoldDistance, maxHoldDistance);
-        }
+        // --------------------------------------------------------------- placement
 
-        private void FixedUpdate()
+        // Runs after the player has moved and rotated the camera this frame,
+        // so the held object never lags behind the view.
+        private void LateUpdate()
         {
             if (held == null || playerCamera == null)
                 return;
 
             Transform cam = playerCamera.transform;
             Vector3 origin = cam.position;
-            Vector3 forward = cam.forward;
+            Vector3 camForward = cam.forward;
 
-            // 1) Scale factor for the desired distance (the S2 = S1 * D2 / D1
-            //    computation itself lives in PerspectiveScaler).
-            float factor = heldScaler != null ? heldScaler.ComputeScaleFactor(holdDistance) : 1f;
-            Vector3 halfExtents = ComputeHalfExtents(factor);
+            // Slide from the original screen position onto the crosshair.
+            centerProgress = centerTime > 0f ? Mathf.Clamp01(centerProgress + Time.deltaTime / centerTime) : 1f;
+            float k = Mathf.SmoothStep(0f, 1f, centerProgress);
+            Vector3 dir = Vector3.Slerp(cam.TransformDirection(pickupLocalDirection), camForward, k).normalized;
 
-            // Keep the camera outside the cube: floor the distance by its scaled size.
-            float distanceFloor = Mathf.Max(minHoldDistance, halfExtents.magnitude * 0.5f);
-            if (holdDistance < distanceFloor)
+            Quaternion rotation = YawRotation(cam) * yawRelativeRotation;
+            Vector3 unitScale = heldScaler.ScaleForDistance(1f); // S0 / D0
+
+            float t = FindFarthestDistance(origin, dir, camForward, rotation, unitScale);
+            currentDistance = t;
+
+            held.transform.SetPositionAndRotation(origin + dir * t, rotation);
+            heldScaler.ApplyForDistance(t);
+        }
+
+        private float FindFarthestDistance(Vector3 origin, Vector3 dir, Vector3 camForward,
+                                           Quaternion rotation, Vector3 unitScale)
+        {
+            int mask = PlacementMask;
+            float tMax = Mathf.Min(maxPlacementDistance, heldScaler.MaxDistance);
+            float minDepthPerUnit = float.MaxValue;
+            float best = tMax;
+
+            for (int i = 0; i < localSamples.Count; i++)
             {
-                holdDistance = distanceFloor;
-                factor = heldScaler != null ? heldScaler.ComputeScaleFactor(holdDistance) : factor;
-                halfExtents = ComputeHalfExtents(factor);
+                // Offset of this surface point from the camera when t = 1.
+                Vector3 v = dir + rotation * Vector3.Scale(localSamples[i], unitScale);
+                float depth = Vector3.Dot(v, camForward);
+                if (depth < minDepthPerUnit) minDepthPerUnit = depth;
+                if (depth <= 0.0001f)
+                    continue; // point behind the camera — handled by tMin
+
+                float len = v.magnitude;
+                float maxRay = best * len;
+                if (Physics.Raycast(origin, v / len, out RaycastHit hit, maxRay, mask, QueryTriggerInteraction.Ignore))
+                {
+                    float tPoint = Mathf.Max(0f, hit.distance - wallMargin) / len;
+                    if (tPoint < best) best = tPoint;
+                }
             }
 
-            // 2) Clamp the distance against geometry along the view direction
-            //    (sphere radius = smallest scaled half-extent, conservative).
-            float radius = Mathf.Max(0.05f, Mathf.Min(halfExtents.x, Mathf.Min(halfExtents.y, halfExtents.z)) - wallMargin);
-            float allowedDistance = holdDistance;
-            if (Physics.SphereCast(origin, radius, forward, out RaycastHit hit, holdDistance, obstructionMask, QueryTriggerInteraction.Ignore))
-                allowedDistance = Mathf.Max(distanceFloor, hit.distance - wallMargin);
-
-            // 3) Overlap check at the target spot: never grow into a wall.
-            //    If it would overlap, stay at the last known-safe distance.
-            float allowedFactor = heldScaler != null ? heldScaler.ComputeScaleFactor(allowedDistance) : factor;
-            Vector3 targetPosition = origin + forward * allowedDistance;
-            if (WouldOverlap(targetPosition, ComputeHalfExtents(allowedFactor)))
-            {
-                allowedDistance = lastSafeDistance;
-                allowedFactor = heldScaler != null ? heldScaler.ComputeScaleFactor(allowedDistance) : 1f;
-                targetPosition = origin + forward * allowedDistance;
-            }
+            // Never let the object swallow the camera or drop below the scale floor.
+            float tMin = heldScaler.MinDistance;
+            if (minDepthPerUnit > 0.0001f)
+                tMin = Mathf.Max(tMin, minViewDepth / minDepthPerUnit);
             else
+                tMin = Mathf.Max(tMin, currentDistance);
+
+            float t = Mathf.Max(tMin, best);
+
+            // Safety net: thin geometry can slip between sample rays. Pull the
+            // object toward the camera until its box is clear.
+            if (t > tMin && Overlaps(origin, dir, rotation, unitScale, t, mask))
             {
-                lastSafeDistance = allowedDistance;
+                float lo = tMin, hi = t;
+                for (int i = 0; i < 10; i++)
+                {
+                    float mid = 0.5f * (lo + hi);
+                    if (Overlaps(origin, dir, rotation, unitScale, mid, mask)) hi = mid;
+                    else lo = mid;
+                }
+                t = lo;
             }
-
-            // 4) Apply scale (transform scaling scales the BoxCollider too), then move.
-            if (heldScaler != null)
-                heldScaler.ApplyScaleFactor(allowedFactor);
-
-            // Kinematic MovePosition complies with collision: the cube slides along
-            // geometry instead of tunnelling, and remains a solid body the player
-            // can stand on after release.
-            held.Body.MovePosition(targetPosition);
+            return t;
         }
 
-        private Vector3 ComputeHalfExtents(float factor)
+        private bool Overlaps(Vector3 origin, Vector3 dir, Quaternion rotation, Vector3 unitScale, float t, int mask)
         {
-            if (held != null && heldScaler != null && held.MainCollider is BoxCollider box)
-                return Vector3.Scale(box.size * 0.5f, heldScaler.ReferenceScale) * factor;
-            return Vector3.one * 0.25f * Mathf.Max(0.01f, factor);
+            Vector3 scale = unitScale * t;
+            Vector3 center = origin + dir * t + rotation * Vector3.Scale(localBoundsCenter, scale);
+            Vector3 half = Vector3.Scale(localBoundsSize * 0.5f, scale);
+            half = new Vector3(Mathf.Max(0.001f, half.x - wallMargin),
+                               Mathf.Max(0.001f, half.y - wallMargin),
+                               Mathf.Max(0.001f, half.z - wallMargin));
+            return Physics.CheckBox(center, half, rotation, mask, QueryTriggerInteraction.Ignore);
         }
 
-        private bool WouldOverlap(Vector3 position, Vector3 halfExtents)
+        /// <summary>Grid of points on the object's local bounding box surface.</summary>
+        private void BuildSamples(ObjectGrabbable grabbable)
         {
-            Collider[] overlaps = Physics.OverlapBox(position, halfExtents, Quaternion.identity, obstructionMask, QueryTriggerInteraction.Ignore);
-            foreach (Collider c in overlaps)
+            GetLocalBounds(grabbable, out localBoundsCenter, out localBoundsSize);
+
+            localSamples.Clear();
+            int n = Mathf.Max(2, samplesPerEdge);
+            for (int axis = 0; axis < 3; axis++)
             {
-                if (held != null && c.transform.root == held.transform.root)
-                    continue; // never count our own collider
-                return true;
+                int u = (axis + 1) % 3, w = (axis + 2) % 3;
+                for (int side = -1; side <= 1; side += 2)
+                    for (int i = 0; i < n; i++)
+                        for (int j = 0; j < n; j++)
+                        {
+                            Vector3 p = Vector3.zero;
+                            p[axis] = 0.5f * side;
+                            p[u] = i / (float)(n - 1) - 0.5f;
+                            p[w] = j / (float)(n - 1) - 0.5f;
+                            localSamples.Add(localBoundsCenter + Vector3.Scale(p, localBoundsSize));
+                        }
             }
-            return false;
+            localSamples.Add(localBoundsCenter);
         }
+
+        private static void GetLocalBounds(ObjectGrabbable grabbable, out Vector3 center, out Vector3 size)
+        {
+            if (grabbable.MainCollider is BoxCollider box)
+            {
+                center = box.center;
+                size = box.size;
+                return;
+            }
+            if (grabbable.MainCollider is MeshCollider mc && mc.sharedMesh != null)
+            {
+                center = mc.sharedMesh.bounds.center;
+                size = mc.sharedMesh.bounds.size;
+                return;
+            }
+            MeshFilter mf = grabbable.GetComponent<MeshFilter>();
+            if (mf != null && mf.sharedMesh != null)
+            {
+                center = mf.sharedMesh.bounds.center;
+                size = mf.sharedMesh.bounds.size;
+                return;
+            }
+            center = Vector3.zero;
+            size = Vector3.one;
+        }
+
+        private static Quaternion YawRotation(Transform cam) => Quaternion.Euler(0f, cam.eulerAngles.y, 0f);
     }
 }

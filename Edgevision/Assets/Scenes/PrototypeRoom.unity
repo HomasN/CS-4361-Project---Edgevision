@@ -265,9 +265,8 @@ MonoBehaviour:
   m_Script: {fileID: 11500000, guid: d81d3e02719fba0408193daedcc6e2b3, type: 3}
   m_Name: 
   m_EditorClassIdentifier: Assembly-CSharp::Edgevision.PerspectiveScaler
-  minScaleFactor: 0.2
-  maxScaleFactor: 5
   minAbsoluteAxisScale: 0.05
+  maxAbsoluteAxisScale: 40
 --- !u!114 &212909151
 MonoBehaviour:
   m_ObjectHideFlags: 0
@@ -303,7 +302,7 @@ Rigidbody:
   m_ImplicitCom: 1
   m_ImplicitTensor: 1
   m_UseGravity: 1
-  m_IsKinematic: 1
+  m_IsKinematic: 0
   m_Interpolate: 1
   m_Constraints: 0
   m_CollisionDetection: 3
@@ -1341,17 +1340,18 @@ MonoBehaviour:
   playerCamera: {fileID: 1607111815}
   highlight: {fileID: 982937001}
   ui: {fileID: 1173176757}
-  interactionRange: 6
+  interactionRange: 15
   grabbableMask:
     serializedVersion: 2
     m_Bits: 256
   obstructionMask:
     serializedVersion: 2
     m_Bits: 1
-  minHoldDistance: 1
-  maxHoldDistance: 8
-  scrollSpeed: 1.5
-  wallMargin: 0.05
+  minViewDepth: 0.3
+  maxPlacementDistance: 150
+  wallMargin: 0.02
+  samplesPerEdge: 5
+  centerTime: 0.12
 --- !u!114 &982937003
 MonoBehaviour:
   m_ObjectHideFlags: 0
@@ -1446,9 +1446,8 @@ MonoBehaviour:
   m_Script: {fileID: 11500000, guid: d81d3e02719fba0408193daedcc6e2b3, type: 3}
   m_Name: 
   m_EditorClassIdentifier: Assembly-CSharp::Edgevision.PerspectiveScaler
-  minScaleFactor: 0.2
-  maxScaleFactor: 5
   minAbsoluteAxisScale: 0.05
+  maxAbsoluteAxisScale: 40
 --- !u!114 &1000616762
 MonoBehaviour:
   m_ObjectHideFlags: 0
@@ -1484,7 +1483,7 @@ Rigidbody:
   m_ImplicitCom: 1
   m_ImplicitTensor: 1
   m_UseGravity: 1
-  m_IsKinematic: 1
+  m_IsKinematic: 0
   m_Interpolate: 1
   m_Constraints: 0
   m_CollisionDetection: 3
@@ -1615,9 +1614,8 @@ MonoBehaviour:
   m_Script: {fileID: 11500000, guid: d81d3e02719fba0408193daedcc6e2b3, type: 3}
   m_Name: 
   m_EditorClassIdentifier: Assembly-CSharp::Edgevision.PerspectiveScaler
-  minScaleFactor: 0.2
-  maxScaleFactor: 5
   minAbsoluteAxisScale: 0.05
+  maxAbsoluteAxisScale: 40
 --- !u!114 &1095012269
 MonoBehaviour:
   m_ObjectHideFlags: 0
@@ -1653,7 +1651,7 @@ Rigidbody:
   m_ImplicitCom: 1
   m_ImplicitTensor: 1
   m_UseGravity: 1
-  m_IsKinematic: 1
+  m_IsKinematic: 0
   m_Interpolate: 1
   m_Constraints: 0
   m_CollisionDetection: 3
@@ -1997,7 +1995,7 @@ MonoBehaviour:
   targetColor: {r: 1, g: 0.85, b: 0.3, a: 1}
   explorePrompt: "WASD move \xB7 Space jump\nAim at a cube and LMB to grab"
   targetPrompt: 'LMB: grab'
-  holdingPrompt: "Scroll: push/pull (resizes) \xB7 LMB: release"
+  holdingPrompt: "Aim at a surface: the object moves there and resizes \xB7 LMB: let go"
 --- !u!224 &1173176758
 RectTransform:
   m_ObjectHideFlags: 0

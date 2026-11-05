@@ -8,45 +8,37 @@ namespace Edgevision
     /// THE MATH
     /// --------
     /// For a perspective camera, the projected on-screen size of an object is
-    /// approximately proportional to its world size divided by its distance:
+    /// proportional to its world size divided by its distance from the camera:
     ///
     ///     screenSize ∝ worldSize / distance
     ///
-    /// To keep the apparent size constant while the hold distance changes, the
-    /// physical scale must therefore satisfy S1 / D1 = S2 / D2, which gives:
+    /// To keep the apparent size constant while the distance changes, the
+    /// physical scale must satisfy S1 / D1 = S2 / D2, which gives:
     ///
     ///     S2 = S1 * (D2 / D1)
     ///
     /// S1 (<see cref="ReferenceScale"/>) and D1 (<see cref="ReferenceDistance"/>)
-    /// are captured ONCE at pickup. Every frame the new scale is recomputed from
-    /// that fixed reference pair — NEVER by multiplying the current scale — so
-    /// floating-point error cannot accumulate into runaway growth/shrink
-    /// (no exponential drift), and repeated pickup/release cycles stay stable.
+    /// are captured ONCE at pickup. Every frame the scale is recomputed from that
+    /// fixed pair — never by multiplying the current scale — so floating-point
+    /// error cannot accumulate into runaway growth or shrink.
     ///
-    /// This demonstrates the graphics concept that changing an object's physical
-    /// size together with its distance can produce an identical projected size.
-    /// (Approximation: works best for moderate FOV and distances measured
-    /// consistently from the camera position, which is what we do.)
-    ///
-    /// COLLIDERS
-    /// ---------
-    /// Uniform transform scaling scales the attached BoxCollider with it, so the
-    /// collider always matches the visual size. The companion ObjectGrabber
-    /// overlap-checks before applying growth so the object can't pop into walls.
+    /// Because scale grows linearly with distance, the held object at distance
+    /// D is an exact copy of the object at distance 1 scaled about the camera
+    /// position by a factor D. Every point of the object therefore slides along
+    /// its own ray from the camera, which is what lets ObjectGrabber find the
+    /// farthest valid placement with plain raycasts (Superliminal-style).
     /// </summary>
     public class PerspectiveScaler : MonoBehaviour
     {
-        [Header("Scale limits (multipliers of the pickup scale)")]
-        [Min(0.01f)]
-        [SerializeField] private float minScaleFactor = 0.2f;
-        [Min(0.01f)]
-        [SerializeField] private float maxScaleFactor = 5f;
-
-        [Header("Safety")]
-        [Tooltip("Absolute floor for any world scale axis; prevents degenerate/zero scale.")]
+        [Header("Absolute scale limits (world scale, per axis)")]
+        [Tooltip("No axis may shrink below this world scale.")]
+        [Min(0.001f)]
         [SerializeField] private float minAbsoluteAxisScale = 0.05f;
+        [Tooltip("No axis may grow beyond this world scale.")]
+        [Min(0.01f)]
+        [SerializeField] private float maxAbsoluteAxisScale = 40f;
 
-        /// <summary>World scale captured at pickup. Constant while held.</summary>
+        /// <summary>Scale captured at pickup. Constant while held.</summary>
         public Vector3 ReferenceScale { get; private set; }
 
         /// <summary>Camera distance captured at pickup. Constant while held.</summary>
@@ -62,32 +54,38 @@ namespace Edgevision
             IsHeld = true;
         }
 
-        /// <summary>
-        /// Returns the scale factor for a camera distance: factor = D2 / D1,
-        /// clamped to [minScaleFactor, maxScaleFactor] and to the absolute
-        /// per-axis safety floor.
-        /// </summary>
-        public float ComputeScaleFactor(float currentDistance)
+        /// <summary>S2 = S1 * (D2 / D1).</summary>
+        public Vector3 ScaleForDistance(float distance)
         {
-            float factor = Mathf.Max(0.01f, currentDistance) / ReferenceDistance;
-
-            // Never let any axis drop below the absolute safety floor.
-            float smallestRefAxis = Mathf.Min(ReferenceScale.x, Mathf.Min(ReferenceScale.y, ReferenceScale.z));
-            float absoluteFloor = smallestRefAxis > 0f
-                ? minAbsoluteAxisScale / smallestRefAxis
-                : minScaleFactor;
-
-            return Mathf.Clamp(factor, Mathf.Max(minScaleFactor, absoluteFloor), maxScaleFactor);
+            return ReferenceScale * (Mathf.Max(0.0001f, distance) / ReferenceDistance);
         }
 
-        /// <summary>
-        /// Applies ReferenceScale * factor to the transform. Guards against
-        /// zero/negative scale so the object can never become degenerate.
-        /// </summary>
-        public void ApplyScaleFactor(float factor)
+        /// <summary>Smallest distance at which no axis drops below the minimum scale.</summary>
+        public float MinDistance
         {
-            Vector3 newScale = ReferenceScale * factor;
-            if (newScale.x <= 0f || newScale.y <= 0f || newScale.z <= 0f)
+            get
+            {
+                float smallest = Mathf.Min(ReferenceScale.x, Mathf.Min(ReferenceScale.y, ReferenceScale.z));
+                return smallest > 0f ? ReferenceDistance * (minAbsoluteAxisScale / smallest) : 0f;
+            }
+        }
+
+        /// <summary>Largest distance at which no axis exceeds the maximum scale.</summary>
+        public float MaxDistance
+        {
+            get
+            {
+                float largest = Mathf.Max(ReferenceScale.x, Mathf.Max(ReferenceScale.y, ReferenceScale.z));
+                return largest > 0f ? ReferenceDistance * (maxAbsoluteAxisScale / largest) : float.MaxValue;
+            }
+        }
+
+        /// <summary>Apply the scale for a distance, refusing degenerate values.</summary>
+        public void ApplyForDistance(float distance)
+        {
+            Vector3 newScale = ScaleForDistance(distance);
+            if (newScale.x <= 0f || newScale.y <= 0f || newScale.z <= 0f ||
+                float.IsNaN(newScale.x) || float.IsNaN(newScale.y) || float.IsNaN(newScale.z))
             {
                 Debug.LogWarning($"[PerspectiveScaler] Refused invalid scale {newScale} on '{name}'.", this);
                 return;
@@ -95,10 +93,7 @@ namespace Edgevision
             transform.localScale = newScale;
         }
 
-        /// <summary>
-        /// Release: the final world scale is simply left on the transform —
-        /// nothing is reset, so the resized object persists and stays interactable.
-        /// </summary>
+        /// <summary>Release: the final scale is left on the transform and persists.</summary>
         public void EndHold() => IsHeld = false;
     }
 }

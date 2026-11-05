@@ -26,7 +26,7 @@ namespace Edgevision
         [TextArea]
         [SerializeField] private string targetPrompt = "LMB: grab";
         [TextArea]
-        [SerializeField] private string holdingPrompt = "Scroll: push/pull (resizes) · LMB: release";
+        [SerializeField] private string holdingPrompt = "Aim at a surface: the object moves there and resizes · LMB: let go";
 
         private bool targeting;
         private bool holding;
