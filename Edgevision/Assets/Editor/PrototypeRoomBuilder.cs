@@ -35,10 +35,10 @@ namespace Edgevision.EditorTools
         private const string InputActionsPath = "Assets/InputSystem_Actions.inputactions";
         private const string GrabbableLayerName = "Grabbable";
 
-        // Room interior: x in [-12, 12], z in [-6, 6], y in [0, 4].
+        // Room interior: x in [-12, 12], z in [-6, 6], y in [0, 7].
         private const float RoomLength = 24f;
         private const float RoomWidth = 12f;
-        private const float RoomHeight = 4f;
+        private const float RoomHeight = 7f; // tall enough to stand (1.8 m) on the 2.4 m ledge
         private const float WallThickness = 1f;
 
         // Dividing wall with doorway, located at x = 4.
@@ -113,7 +113,7 @@ namespace Edgevision.EditorTools
                 new Vector3(DoorWallThickness, RoomHeight, sideWidth), wallMat, parent);
             CreateBox("DoorWall_Right", new Vector3(DoorWallX, RoomHeight / 2f, sideCenterZ),
                 new Vector3(DoorWallThickness, RoomHeight, sideWidth), wallMat, parent);
-            float lintelHeight = RoomHeight - DoorHeight; // 1.7
+            float lintelHeight = RoomHeight - DoorHeight; // 4.7
             CreateBox("DoorWall_Lintel", new Vector3(DoorWallX, DoorHeight + lintelHeight / 2f, 0f),
                 new Vector3(DoorWallThickness, lintelHeight, DoorWidth), wallMat, parent);
         }
